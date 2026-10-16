@@ -1,0 +1,6 @@
+{
+  "name": "PickAI",
+  "description": "All-in-one AI tools explorer, voice assistant, creative prompt playground, and bookmark hub.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
