@@ -1,5 +1,7 @@
 package com.example.ui.viewmodel
 
+import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -7,10 +9,13 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.api.GeminiVoiceService
+import com.example.data.api.VoiceApiResult
 import com.example.data.model.AiNewsItem
 import com.example.data.model.AiTool
 import com.example.data.repository.AiNewsRepository
 import com.example.data.repository.AiToolRepository
+import com.example.data.repository.SavedArticlesRepository
+import com.example.util.AiVoiceManager
 import kotlinx.coroutines.launch
 
 sealed class VoiceAssistantState {
@@ -18,7 +23,11 @@ sealed class VoiceAssistantState {
     data class Listening(val partialText: String = "", val rmsLevel: Float = 1f) : VoiceAssistantState()
     data class Processing(val spokenQuery: String) : VoiceAssistantState()
     data class Speaking(val spokenQuery: String, val answer: String) : VoiceAssistantState()
-    data class Error(val message: String) : VoiceAssistantState()
+    data class Error(
+        val message: String,
+        val canRetry: Boolean = true,
+        val failedQuery: String = ""
+    ) : VoiceAssistantState()
 }
 
 data class VoiceMessage(
@@ -92,12 +101,55 @@ class MainViewModel : ViewModel() {
         return AiToolRepository.getToolById(toolId)
     }
 
-    // Daily Selected AI News
-    val dailyNews: List<AiNewsItem>
-        get() = AiNewsRepository.dailyNews
+    // -------------------------------------------------------------------------
+    // AUTOMATIC LATEST AI NEWS (Real RSS, Caching, Offline Support, Refresh)
+    // -------------------------------------------------------------------------
+    var newsList by mutableStateOf<List<AiNewsItem>>(AiNewsRepository.getCachedOrFallbackNews())
+        private set
 
-    private val _bookmarkedNewsIds = mutableStateListOf<String>()
-    val bookmarkedNewsIds: List<String> get() = _bookmarkedNewsIds
+    var isNewsLoading by mutableStateOf(false)
+        private set
+
+    var newsErrorMessage by mutableStateOf<String?>(null)
+        private set
+
+    var isNewsOffline by mutableStateOf(false)
+        private set
+
+    val dailyNews: List<AiNewsItem>
+        get() = newsList
+
+    fun loadNews(context: Context? = null, forceRefresh: Boolean = false) {
+        viewModelScope.launch {
+            if (context != null) {
+                SavedArticlesRepository.init(context)
+            }
+            isNewsLoading = true
+            newsErrorMessage = null
+            try {
+                val result = AiNewsRepository.fetchNews(context = context, forceRefresh = forceRefresh)
+                newsList = result.items
+                isNewsOffline = result.isOffline
+                newsErrorMessage = result.errorMessage
+            } catch (e: Exception) {
+                Log.w("MainViewModel", "Failed to fetch real news: ${e.message}")
+                newsErrorMessage = "Unable to fetch live news. Showing cached articles."
+                val cached = AiNewsRepository.getCachedOrFallbackNews(context)
+                if (cached.isNotEmpty()) {
+                    newsList = cached
+                    isNewsOffline = true
+                }
+            } finally {
+                isNewsLoading = false
+            }
+        }
+    }
+
+    val savedArticles: List<AiNewsItem>
+        get() = SavedArticlesRepository.savedArticles
+
+    val bookmarkedNewsIds: List<String>
+        get() = SavedArticlesRepository.savedArticles.map { it.id }
 
     var selectedNewsForDetail by mutableStateOf<AiNewsItem?>(null)
         private set
@@ -110,16 +162,37 @@ class MainViewModel : ViewModel() {
         selectedNewsForDetail = null
     }
 
-    fun isNewsBookmarked(newsId: String): Boolean {
-        return _bookmarkedNewsIds.contains(newsId)
+    fun initSavedArticles(context: Context) {
+        SavedArticlesRepository.init(context)
     }
 
-    fun toggleBookmarkNews(newsId: String) {
-        if (_bookmarkedNewsIds.contains(newsId)) {
-            _bookmarkedNewsIds.remove(newsId)
-        } else {
-            _bookmarkedNewsIds.add(newsId)
-        }
+    fun isArticleSaved(article: AiNewsItem): Boolean {
+        return SavedArticlesRepository.isSaved(article)
+    }
+
+    fun isNewsBookmarked(newsId: String): Boolean {
+        return SavedArticlesRepository.isSaved(newsId)
+    }
+
+    fun toggleSaveArticle(context: Context?, article: AiNewsItem): Boolean {
+        return SavedArticlesRepository.toggleSave(context, article)
+    }
+
+    fun toggleBookmarkNews(newsId: String, context: Context? = null) {
+        val found = dailyNews.find { it.id == newsId }
+            ?: savedArticles.find { it.id == newsId }
+            ?: AiNewsItem(
+                id = newsId,
+                title = "News $newsId",
+                summary = "AI breakthrough announcement",
+                source = "AI News"
+            )
+        SavedArticlesRepository.toggleSave(context, found)
+    }
+
+    init {
+        // Automatically load latest real AI news on startup
+        loadNews()
     }
 
     // Creative Tool Generation states
@@ -130,7 +203,6 @@ class MainViewModel : ViewModel() {
     fun generateSummary(style: String = "Bullet Points") {
         if (summaryInputText.isBlank()) return
         isGeneratingSummary = true
-        // Quick high quality structured summary generator
         val lines = summaryInputText.split("\n", ". ").filter { it.isNotBlank() }
         val bullets = lines.take(4).mapIndexed { i, l -> "• Key Insight ${i + 1}: ${l.trim().take(90)}..." }
         summaryOutputText = when (style) {
@@ -187,11 +259,39 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    // Voice assistant state management
+    // -------------------------------------------------------------------------
+    // VOICE ASSISTANT STATE MANAGEMENT & REAL AI REPLIES
+    // -------------------------------------------------------------------------
     var voiceState by mutableStateOf<VoiceAssistantState>(VoiceAssistantState.Idle)
         private set
 
     var isTtsSpeaking by mutableStateOf(false)
+
+    var voiceSpeechRate by mutableStateOf(1.0f)
+        private set
+
+    var preferredVoiceGender by mutableStateOf("natural") // "natural", "female", "male"
+        private set
+
+    var isSpeechOutputEnabled by mutableStateOf(true)
+        private set
+
+    @Volatile
+    private var isGenerating = false
+
+    fun updateSpeechRate(rate: Float) {
+        voiceSpeechRate = rate
+        AiVoiceManager.speechRate = rate
+    }
+
+    fun updatePreferredVoiceGender(gender: String) {
+        preferredVoiceGender = gender
+        AiVoiceManager.preferredStyle = gender
+    }
+
+    fun toggleSpeechOutput() {
+        isSpeechOutputEnabled = !isSpeechOutputEnabled
+    }
 
     fun updateVoiceState(newState: VoiceAssistantState) {
         voiceState = newState
@@ -205,22 +305,20 @@ class MainViewModel : ViewModel() {
     val voiceMessages = mutableStateListOf<VoiceMessage>(
         VoiceMessage(
             sender = "pickai",
-            text = "Namaste! Main PickAI hoon. Tap to Talk dabayein ya koi bhi sawal poochein, main turant audio ke saath jawab dunga."
+            text = "Namaste! Main PickAI hoon. Center orb dabayein ya text se sawal poochein, main real AI response dunga."
         )
     )
 
-    fun sendVoiceMessage(query: String): String {
+    fun sendVoiceMessage(query: String, onAnswerReady: (answer: String) -> Unit = {}) {
         val q = query.trim()
-        if (q.isBlank()) return ""
-        voiceMessages.add(VoiceMessage(sender = "user", text = q))
-        val answer = generateLocalAnswer(q)
-        voiceMessages.add(VoiceMessage(sender = "pickai", text = answer))
-        processVoiceInputWithGemini(q) {}
-        return answer
+        if (q.isBlank()) return
+        processVoiceInputWithGemini(q, onAnswerReady)
     }
 
     /**
-     * Proper State Management & Callback to process user voice input with Gemini API
+     * Processes user voice or text input directly with Gemini 3.5 Flash API.
+     * Never silently falls back to fake or unrelated answers.
+     * Prevents duplicate requests.
      */
     fun processVoiceInputWithGemini(
         spokenQuery: String,
@@ -228,75 +326,57 @@ class MainViewModel : ViewModel() {
     ) {
         val query = spokenQuery.trim()
         if (query.isBlank()) {
-            voiceState = VoiceAssistantState.Idle
+            voiceState = VoiceAssistantState.Error(
+                message = "Aawaz detect nahi hui. Kripya orb dabakar dobara bolein.",
+                canRetry = false
+            )
             return
         }
 
-        // 1. Transition state to Processing
+        if (isGenerating) {
+            Log.d("MainViewModel", "Ignoring duplicate request while already generating")
+            return
+        }
+        isGenerating = true
+
+        // 1. Transition state to Processing and record user transcript
         voiceState = VoiceAssistantState.Processing(spokenQuery = query)
         voiceMessages.add(VoiceMessage(sender = "user", text = query))
 
         viewModelScope.launch {
-            // 2. Call Gemini API (gemini-3.5-flash)
-            val geminiAnswer = GeminiVoiceService.generateVoiceAnswer(query)
-            val finalAnswer = if (!geminiAnswer.isNullOrBlank()) {
-                geminiAnswer
-            } else {
-                generateLocalAnswer(query)
+            try {
+                // 2. Call Gemini API
+                when (val result = GeminiVoiceService.generateVoiceAnswer(query)) {
+                    is VoiceApiResult.Success -> {
+                        val answer = result.answer
+                        // 3. Update conversation history
+                        voiceMessages.add(VoiceMessage(sender = "pickai", text = answer))
+                        // 4. Transition to Speaking and trigger TTS
+                        voiceState = VoiceAssistantState.Speaking(spokenQuery = query, answer = answer)
+                        onAnswerReady(answer)
+                    }
+                    is VoiceApiResult.Error -> {
+                        Log.w("MainViewModel", "Gemini Voice API failed: ${result.technicalDetail}")
+                        // Transition to Error with clear user feedback and retry ability
+                        voiceState = VoiceAssistantState.Error(
+                            message = result.userFriendlyMessage,
+                            canRetry = true,
+                            failedQuery = query
+                        )
+                    }
+                }
+            } finally {
+                isGenerating = false
             }
-
-            // 3. Update conversation history
-            voiceMessages.add(VoiceMessage(sender = "pickai", text = finalAnswer))
-
-            // 4. Transition state to Speaking and trigger audio playback callback
-            voiceState = VoiceAssistantState.Speaking(spokenQuery = query, answer = finalAnswer)
-            onAnswerReady(finalAnswer)
         }
     }
 
-    fun generateLocalAnswer(query: String): String {
-        val q = query.lowercase().trim()
-        return when {
-            // Daily AI News queries
-            q.contains("news") || q.contains("khabar") || q.contains("samachar") || q.contains("update") || q.contains("today") || q.contains("aaj ki") -> {
-                val topStory = AiNewsRepository.dailyNews.firstOrNull()
-                if (topStory != null) {
-                    "Aaj ki sabse badi AI news: ${topStory.title}. ${topStory.summary} Aap Home tab par Daily AI Pulse mein iska pura analysis padh sakte hain."
-                } else {
-                    "Aaj AI field mein multi-agent systems aur real-time video generation par tezi se breakthroughs aa rahe hain. Home screen par Daily AI pulse check karein."
-                }
-            }
-
-            // Greetings & Introduction
-            q.contains("namaste") || q.contains("hello") || q.contains("hi") || q.contains("kaise ho") || q.contains("how are you") || q.contains("who are you") || q.contains("kaun ho") ->
-                "Namaste! Main PickAI hoon, aapka personal AI voice companion. Aap mujhse kisi bhi AI tool, coding help, ya daily AI news ke baare mein pooch sakte hain."
-
-            // Image generation
-            q.contains("image") || q.contains("photo") || q.contains("draw") || q.contains("art") || q.contains("picture") || q.contains("tasveer") ->
-                "Photo aur photorealistic art ke liye Midjourney v6 sabse powerful hai. Agar aapko accurate text, logos, ya direct prompt editing chahiye to DALL-E 3 chunein."
-
-            // Coding & Programming
-            q.contains("code") || q.contains("coding") || q.contains("bug") || q.contains("kotlin") || q.contains("python") || q.contains("program") || q.contains("developer") ->
-                "Coding ke liye Cursor AI aur GitHub Copilot sabse behtar hain. Complex algorithms aur architecture design ke liye Claude 3.5 Sonnet best perform karta hai."
-
-            // Writing, Email & Summary
-            q.contains("write") || q.contains("likh") || q.contains("email") || q.contains("summary") || q.contains("content") || q.contains("essay") || q.contains("patra") ->
-                "Content drafting aur emails ke liye ChatGPT aur Notion AI sabse acche hain. PickAI ke Studio tab mein built-in Text Summarizer bhi available hai."
-
-            // Audio & Music
-            q.contains("music") || q.contains("audio") || q.contains("gana") || q.contains("voice") || q.contains("sound") || q.contains("awaz") || q.contains("song") ->
-                "Full songs vocals ke saath banane ke liye Suno AI v3.5 use karein, aur ultra-realistic human voice cloning ke liye ElevenLabs sabse best hai."
-
-            // Video Generation
-            q.contains("video") || q.contains("film") || q.contains("animation") || q.contains("movie") ->
-                "Cinematic AI video generation ke liye Runway Gen-3 Alpha aur realistic talking digital avatars ke liye HeyGen sabse aage hain."
-
-            // Search & Research
-            q.contains("search") || q.contains("research") || q.contains("dhoond") || q.contains("khoj") ->
-                "Real-time internet search aur accurate citations ke liye Perplexity AI sabse best answer engine hai."
-
-            else ->
-                "Aapka sawaal bohot badhiya hai! PickAI par iske liye world-class tools mojood hain. Aap Home tab par Category filter dekh sakte hain ya mujhe specific task batayein."
+    fun retryVoiceQuery(onAnswerReady: (answer: String) -> Unit) {
+        val current = voiceState
+        if (current is VoiceAssistantState.Error && current.failedQuery.isNotBlank()) {
+            processVoiceInputWithGemini(current.failedQuery, onAnswerReady)
+        } else {
+            resetVoiceState()
         }
     }
 }

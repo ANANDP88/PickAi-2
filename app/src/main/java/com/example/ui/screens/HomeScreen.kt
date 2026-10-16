@@ -37,12 +37,18 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
+import com.example.util.ShareHelper
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -75,9 +81,14 @@ fun HomeScreen(
     navController: NavController,
     viewModel: MainViewModel
 ) {
+    val context = LocalContext.current
     var searchQuery by remember { mutableStateOf("") }
     var selectedCategoryFilter by remember { mutableStateOf("All") }
     var selectedNewsItem by remember { mutableStateOf<AiNewsItem?>(null) }
+
+    LaunchedEffect(Unit) {
+        viewModel.loadNews(context = context)
+    }
 
     val categoryFilterItems = listOf(
         CategoryFilterItem("All", "All", Icons.Default.GridView),
@@ -109,6 +120,10 @@ fun HomeScreen(
                     tool.tags.any { it.lowercase().contains(q) }
             }
         }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.initSavedArticles(context)
     }
 
     LazyColumn(
@@ -303,36 +318,61 @@ fun HomeScreen(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = Color(0xFFD1FAE5)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (viewModel.isNewsOffline) Color(0xFFFEF3C7) else Color(0xFFD1FAE5)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.LocalFireDepartment,
-                                contentDescription = null,
-                                tint = Color(0xFF059669),
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Text(
-                                text = "Updated Today",
-                                fontSize = 11.sp,
-                                color = Color(0xFF059669),
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LocalFireDepartment,
+                                    contentDescription = null,
+                                    tint = if (viewModel.isNewsOffline) Color(0xFFD97706) else Color(0xFF059669),
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = if (viewModel.isNewsOffline) "Offline Cache" else "Live News",
+                                    fontSize = 11.sp,
+                                    color = if (viewModel.isNewsOffline) Color(0xFFD97706) else Color(0xFF059669),
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = { viewModel.loadNews(context = context, forceRefresh = true) },
+                            modifier = Modifier.size(32.dp).testTag("refresh_news_button")
+                        ) {
+                            if (viewModel.isNewsLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(15.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color(0xFF4F46E5)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Refresh news",
+                                    tint = Color(0xFF6366F1),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
 
             // Featured Hero Card: Purple-to-Cyan gradient with 3D mascot, Top Story badge, and white CTA button
-            val topStory = AiNewsRepository.dailyNews.firstOrNull()
+            val topStory = viewModel.dailyNews.firstOrNull()
             if (topStory != null) {
                 item {
                     Card(
@@ -358,7 +398,7 @@ fun HomeScreen(
                                 .padding(18.dp)
                         ) {
                             Column {
-                                // Top row: "🔥 Top Story" badge & Source • Time
+                                // Top row: "🔥 Top Story" badge & Source • Time & Bookmark Button
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -377,12 +417,50 @@ fun HomeScreen(
                                         )
                                     }
 
-                                    Text(
-                                        text = "${topStory.source} • ${topStory.timeAgo}",
-                                        fontSize = 12.sp,
-                                        color = Color.White.copy(alpha = 0.85f),
-                                        fontWeight = FontWeight.Medium
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "${topStory.source} • ${topStory.timeAgo}",
+                                            fontSize = 12.sp,
+                                            color = Color.White.copy(alpha = 0.85f),
+                                            fontWeight = FontWeight.Medium
+                                        )
+
+                                        IconButton(
+                                            onClick = { ShareHelper.shareArticle(context, topStory) },
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(0x33FFFFFF))
+                                                .testTag("share_top_story_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Share,
+                                                contentDescription = "Share article",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+
+                                        val isTopStorySaved = viewModel.isArticleSaved(topStory)
+                                        IconButton(
+                                            onClick = { viewModel.toggleSaveArticle(context, topStory) },
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .clip(CircleShape)
+                                                .background(if (isTopStorySaved) Color(0x44FBBF24) else Color(0x33FFFFFF))
+                                                .testTag("bookmark_top_story_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isTopStorySaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                                contentDescription = if (isTopStorySaved) "Unsave article" else "Save article",
+                                                tint = if (isTopStorySaved) Color(0xFFFBBF24) else Color.White,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.height(12.dp))
@@ -472,7 +550,7 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    val secondaryNews = AiNewsRepository.dailyNews.drop(1).take(2)
+                    val secondaryNews = viewModel.dailyNews.drop(1).take(2)
                     secondaryNews.forEachIndexed { index, news ->
                         val isFirstCard = index == 0
                         val cardBg = if (isFirstCard) Color(0xFFF0FDF4) else Color(0xFFFFFBEB)
@@ -517,11 +595,45 @@ fun HomeScreen(
                                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                         )
                                     }
-                                    Text(
-                                        text = news.timeAgo,
-                                        fontSize = 11.sp,
-                                        color = Color(0xFF64748B)
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = news.timeAgo,
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF64748B)
+                                        )
+
+                                        IconButton(
+                                            onClick = { ShareHelper.shareArticle(context, news) },
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .testTag("share_secondary_${news.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Share,
+                                                contentDescription = "Share article",
+                                                tint = Color(0xFF64748B),
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+
+                                        val isSecondarySaved = viewModel.isArticleSaved(news)
+                                        IconButton(
+                                            onClick = { viewModel.toggleSaveArticle(context, news) },
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .testTag("bookmark_secondary_${news.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isSecondarySaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                                contentDescription = if (isSecondarySaved) "Unsave article" else "Save article",
+                                                tint = if (isSecondarySaved) MaterialTheme.colorScheme.primary else Color(0xFF94A3B8),
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.height(10.dp))
@@ -916,7 +1028,7 @@ fun HomeScreen(
     // Daily News Detailed Breakdown Modal Dialog
     if (selectedNewsItem != null) {
         val news = selectedNewsItem!!
-        val isBookmarked = viewModel.isNewsBookmarked(news.id)
+        val isBookmarked = viewModel.isArticleSaved(news)
 
         Dialog(onDismissRequest = { selectedNewsItem = null }) {
             Card(
@@ -954,11 +1066,22 @@ fun HomeScreen(
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(
-                                onClick = { viewModel.toggleBookmarkNews(news.id) }
+                                onClick = { ShareHelper.shareArticle(context, news) },
+                                modifier = Modifier.testTag("dialog_share_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Share news",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.toggleSaveArticle(context, news) },
+                                modifier = Modifier.testTag("dialog_bookmark_button")
                             ) {
                                 Icon(
                                     imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                                    contentDescription = "Save news",
+                                    contentDescription = if (isBookmarked) "Unsave news" else "Save news",
                                     tint = if (isBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
@@ -984,7 +1107,7 @@ fun HomeScreen(
                         )
 
                         Text(
-                            text = "${news.source} • ${news.timeAgo} • ${news.readTime}",
+                            text = "${news.source} • ${news.timeAgo}${if (news.formattedDateTime.isNotBlank()) " • ${news.formattedDateTime}" else ""} • ${news.readTime}",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.SemiBold
@@ -1079,7 +1202,53 @@ fun HomeScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    Button(
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { ShareHelper.shareArticle(context, news) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("modal_share_article_button"),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Share")
+                        }
+
+                        if (news.url.isNotBlank()) {
+                            Button(
+                                onClick = {
+                                    try {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(news.url))
+                                        context.startActivity(intent)
+                                    } catch (_: Exception) {}
+                                },
+                                modifier = Modifier
+                                    .weight(1.6f)
+                                    .testTag("open_source_article_button"),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Read Source", maxLines = 1)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    TextButton(
                         onClick = { selectedNewsItem = null },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)

@@ -39,10 +39,16 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicNone
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeMute
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Warning
+import com.example.util.AiVoiceManager
+import com.example.util.ShareHelper
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -100,17 +106,26 @@ fun VoiceScreen(
     var tts: TextToSpeech? by remember { mutableStateOf(null) }
     var isTtsReady by remember { mutableStateOf(false) }
 
-    // Initialize TextToSpeech engine
+    // Initialize TextToSpeech engine with Google TTS natural voices
     DisposableEffect(Unit) {
-        val ttsInstance = TextToSpeech(context) { status ->
+        var ttsInstance: TextToSpeech? = null
+        ttsInstance = TextToSpeech(context, { status ->
             if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale("hi", "IN")
-                if (tts?.isLanguageAvailable(Locale("hi", "IN")) != TextToSpeech.LANG_AVAILABLE) {
-                    tts?.language = Locale.US
-                }
                 isTtsReady = true
+                ttsInstance?.let {
+                    AiVoiceManager.configureOptimalVoice(it, Locale("hi", "IN"))
+                }
+            } else {
+                // Fallback to standard system engine
+                val fallbackTts = TextToSpeech(context) { fbStatus ->
+                    if (fbStatus == TextToSpeech.SUCCESS) {
+                        isTtsReady = true
+                    }
+                }
+                tts = fallbackTts
             }
-        }
+        }, AiVoiceManager.GOOGLE_TTS_ENGINE)
+
         ttsInstance.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
                 viewModel.isTtsSpeaking = true
@@ -139,12 +154,18 @@ fun VoiceScreen(
         }
     }
 
-    // Function to speak aloud text response
+    // Function to speak aloud natural response without markdown or URLs
     fun speakAloud(text: String) {
-        if (text.isNotBlank() && isTtsReady) {
+        val clean = AiVoiceManager.cleanTextForSpeech(text)
+        if (clean.isNotBlank() && isTtsReady && tts != null) {
             tts?.stop()
             viewModel.isTtsSpeaking = true
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "pickai_voice_${System.currentTimeMillis()}")
+            val locale = AiVoiceManager.detectLocale(clean)
+            AiVoiceManager.configureOptimalVoice(tts!!, locale)
+            val params = Bundle().apply {
+                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+            }
+            tts?.speak(clean, TextToSpeech.QUEUE_FLUSH, params, "pickai_voice_${System.currentTimeMillis()}")
         }
     }
 
@@ -233,14 +254,12 @@ fun VoiceScreen(
 
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             viewModel.updateVoiceState(
-                VoiceAssistantState.Listening(partialText = "Listening... Bolna shuru karein", rmsLevel = 2f)
+                VoiceAssistantState.Error(
+                    message = "Device par Speech Recognition uplabdh nahi hai. System Dialog ya Keyboard input mode use karein.",
+                    canRetry = true,
+                    failedQuery = ""
+                )
             )
-            scope.launch {
-                delay(2800)
-                if (viewModel.voiceState is VoiceAssistantState.Listening) {
-                    stopListeningAndProcess("Aaj ki sabse important AI news aur best tools batao")
-                }
-            }
             return
         }
 
@@ -253,17 +272,19 @@ fun VoiceScreen(
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
-                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "hi-IN", "en-IN"))
+                // Multi-language recognition (Hindi, Hinglish, and English)
+                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("hi-IN", "en-IN", "en-US"))
                 putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
             }
 
             recognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     viewModel.updateVoiceState(
-                        VoiceAssistantState.Listening(partialText = "Listening...", rmsLevel = 1f)
+                        VoiceAssistantState.Listening(partialText = "Listening... Bolna shuru karein", rmsLevel = 1f)
                     )
                 }
 
@@ -309,8 +330,21 @@ fun VoiceScreen(
                         stopListeningAndProcess(currentSpokenText)
                     } else {
                         showVirtualMicHelper = true
+                        val errorMsg = when (error) {
+                            SpeechRecognizer.ERROR_NO_MATCH -> "Kuch saaf nahi sunai diya. Kripya thoda paas aakar saaf bolein."
+                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Aawaz detect nahi hui. Kripya Retry button dabayein aur bolein."
+                            SpeechRecognizer.ERROR_AUDIO -> "Audio recording mein problem aayi. Microphone check karein."
+                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission grant nahi hai. Settings se allow karein."
+                            SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Voice recognition ke liye internet connection zaroori hai."
+                            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Speech recognizer busy hai. Ek second ruk kar try karein."
+                            else -> "Voice recognition error ($error). Kripya Retry dabayein."
+                        }
                         viewModel.updateVoiceState(
-                            VoiceAssistantState.Error("Aawaz detect nahi hui. Suggestions par tap karein ya keyboard se poochein.")
+                            VoiceAssistantState.Error(
+                                message = errorMsg,
+                                canRetry = true,
+                                failedQuery = ""
+                            )
                         )
                     }
                 }
@@ -326,7 +360,11 @@ fun VoiceScreen(
                     } else {
                         showVirtualMicHelper = true
                         viewModel.updateVoiceState(
-                            VoiceAssistantState.Error("Kuch saaf nahi sunai diya. Dobara try karein.")
+                            VoiceAssistantState.Error(
+                                message = "Aawaz detect nahi hui. Kripya Retry dabayein aur bolein.",
+                                canRetry = true,
+                                failedQuery = ""
+                            )
                         )
                     }
                 }
@@ -824,7 +862,7 @@ fun VoiceScreen(
                             else -> {
                                 Icon(
                                     imageVector = Icons.Default.Mic,
-                                    contentDescription = "Tap to Talk",
+                                    contentDescription = "Tap Orb to Talk",
                                     tint = Color.White,
                                     modifier = Modifier.size(34.dp)
                                 )
@@ -835,7 +873,8 @@ fun VoiceScreen(
             }
 
             // -------------------------------------------------------------
-            // 3. CONVERSATION TRANSCRIPT & LIVE STATUS (ChatGPT Voice style)
+            // 3. CONVERSATION TRANSCRIPT & LIVE STATUS
+            // Clear States: Ready, Listening, Processing, Speaking, Error
             // -------------------------------------------------------------
             Column(
                 modifier = Modifier
@@ -843,37 +882,139 @@ fun VoiceScreen(
                     .padding(horizontal = 8.dp, vertical = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Status caption
-                val statusText = when (voiceState) {
+                // Live Transcription or State Status Badge
+                when (voiceState) {
                     is VoiceAssistantState.Listening -> {
-                        if (voiceState.partialText.isNotBlank()) "\"${voiceState.partialText}\""
-                        else "Listening... (Rukte hi jawab aayega)"
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = Color(0x33EF4444),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x66EF4444))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFEF4444))
+                                )
+                                Text(
+                                    text = if (voiceState.partialText.isNotBlank()) voiceState.partialText else "Listening... (Aap bol sakte hain)",
+                                    color = Color(0xFFFCA5A5),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
                     }
-                    is VoiceAssistantState.Processing -> "Thinking..."
-                    is VoiceAssistantState.Speaking -> "PickAI speaking"
-                    is VoiceAssistantState.Error -> voiceState.message
-                    is VoiceAssistantState.Idle -> "Tap orb or mic to start talking"
+                    is VoiceAssistantState.Processing -> {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = Color(0x3338BDF8),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x6638BDF8))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 2.dp,
+                                    color = skyCyan
+                                )
+                                Text(
+                                    text = "Processing with Gemini 3.5 Flash...",
+                                    color = skyCyan,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                    is VoiceAssistantState.Speaking -> {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = Color(0x337C3AED),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x667C3AED))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.GraphicEq,
+                                    contentDescription = null,
+                                    tint = softLavender,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Speaking response aloud...",
+                                    color = softLavender,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                    is VoiceAssistantState.Error -> {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = Color(0x33F43F5E),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x88F43F5E)),
+                            modifier = Modifier.testTag("voice_error_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFDA4AF),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = voiceState.message,
+                                    color = Color(0xFFFDA4AF),
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                    maxLines = 2
+                                )
+                                if (voiceState.canRetry) {
+                                    TextButton(
+                                        onClick = {
+                                            viewModel.retryVoiceQuery { speakAloud(it) }
+                                        },
+                                        modifier = Modifier.height(28.dp).testTag("voice_error_retry_btn")
+                                    ) {
+                                        Text("Retry", color = skyCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    is VoiceAssistantState.Idle -> {
+                        Text(
+                            text = "Tap the glowing central orb to talk in Hindi, Hinglish, or English",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                    }
                 }
 
-                Text(
-                    text = statusText,
-                    color = when (voiceState) {
-                        is VoiceAssistantState.Listening -> Color(0xFFF87171)
-                        is VoiceAssistantState.Processing -> skyCyan
-                        is VoiceAssistantState.Speaking -> softLavender
-                        is VoiceAssistantState.Error -> Color(0xFFFB7185)
-                        else -> Color(0xFF94A3B8)
-                    },
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-
-                // Virtual Mic Helper Banner (for streaming emulator with silent mic)
-                if (showVirtualMicHelper && !isSpeaking && !isProcessing) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                // Virtual Mic Helper Banner (for emulator with silent mic)
+                if (showVirtualMicHelper && !isSpeaking && !isProcessing && voiceState !is VoiceAssistantState.Error) {
+                    Spacer(modifier = Modifier.height(6.dp))
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = Color(0xFF1E2235),
@@ -881,29 +1022,29 @@ fun VoiceScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "💡 Virtual mic silent? Neeche quick suggestion par tap karein ya text se poochein:",
+                                text = "💡 Tip: Tap quick suggestions below or use keyboard mode to ask anything:",
                                 color = Color(0xFFCBD5E1),
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 modifier = Modifier.weight(1f)
                             )
                         }
                     }
                 }
 
-                // AI Answer Card (Floating modern translucent dark glass)
+                // AI Answer Card with visible Play/Pause/Stop control
                 val latestAnswer = (voiceState as? VoiceAssistantState.Speaking)?.answer
                     ?: viewModel.voiceMessages.lastOrNull { it.sender == "pickai" }?.text
 
                 if (!latestAnswer.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 140.dp)
+                            .heightIn(max = 145.dp)
                             .testTag("voice_answer_card"),
                         shape = RoundedCornerShape(18.dp),
                         color = Color(0xFF161928),
@@ -936,16 +1077,51 @@ fun VoiceScreen(
                                         fontWeight = FontWeight.Bold
                                     )
                                 }
-                                IconButton(
-                                    onClick = { speakAloud(latestAnswer) },
-                                    modifier = Modifier.size(24.dp)
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.VolumeUp,
-                                        contentDescription = "Replay",
-                                        tint = Color(0xFF94A3B8),
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                    // Play / Replay button
+                                    IconButton(
+                                        onClick = { speakAloud(latestAnswer) },
+                                        modifier = Modifier.size(28.dp).testTag("voice_answer_replay_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.VolumeUp,
+                                            contentDescription = "Play/Replay answer",
+                                            tint = if (isTtsSpeaking) skyCyan else Color(0xFF94A3B8),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    // Stop Speaking button
+                                    if (isTtsSpeaking) {
+                                        IconButton(
+                                            onClick = { stopAudioPlayback() },
+                                            modifier = Modifier.size(28.dp).testTag("voice_answer_stop_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Stop,
+                                                contentDescription = "Stop speaking",
+                                                tint = Color(0xFFF43F5E),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+
+                                    // Share Answer / Link button
+                                    IconButton(
+                                        onClick = { ShareHelper.shareAiAnswer(context, latestAnswer) },
+                                        modifier = Modifier.size(28.dp).testTag("voice_answer_share_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Share,
+                                            contentDescription = "Share answer",
+                                            tint = Color(0xFF94A3B8),
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
                                 }
                             }
                             Spacer(modifier = Modifier.height(4.dp))
@@ -961,7 +1137,12 @@ fun VoiceScreen(
             }
 
             // -------------------------------------------------------------
-            // 4. BOTTOM FLOATING CONTROLS (ChatGPT Advanced Voice Capsule)
+            // 4. BOTTOM FLOATING CONTROLS
+            // NO redundant microphone buttons:
+            // - Central Orb is the single main voice control.
+            // - Left: Keyboard mode toggle
+            // - Center: Cancel / Stop button when active, or Ready status chip
+            // - Right: Speaker output / mute toggle
             // -------------------------------------------------------------
             Column(
                 modifier = Modifier
@@ -1054,7 +1235,7 @@ fun VoiceScreen(
                                         stopAudioPlayback()
                                         stopListeningAndProcess(q)
                                     },
-                                    modifier = Modifier.size(36.dp)
+                                    modifier = Modifier.size(36.dp).testTag("voice_keyboard_send_button")
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Send,
@@ -1068,7 +1249,7 @@ fun VoiceScreen(
                     }
                 }
 
-                // The Iconic Floating Pill Dock (ChatGPT Voice style)
+                // The Clean Floating Capsule Dock
                 Surface(
                     shape = RoundedCornerShape(36.dp),
                     color = Color(0xFF141724),
@@ -1076,16 +1257,16 @@ fun VoiceScreen(
                     shadowElevation = 8.dp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(72.dp)
+                        .height(68.dp)
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(horizontal = 24.dp),
+                            .padding(horizontal = 20.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Left: Keyboard Mode Button
+                        // Left: Keyboard Toggle Button
                         Surface(
                             shape = CircleShape,
                             color = if (isKeyboardModeOpen) Color(0xFF262A40) else Color(0xFF1B1E30),
@@ -1093,69 +1274,93 @@ fun VoiceScreen(
                         ) {
                             IconButton(
                                 onClick = { isKeyboardModeOpen = !isKeyboardModeOpen },
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier.fillMaxSize().testTag("voice_keyboard_toggle")
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Keyboard,
-                                    contentDescription = "Keyboard mode",
+                                    contentDescription = "Toggle Keyboard input",
                                     tint = if (isKeyboardModeOpen) skyCyan else Color(0xFFCBD5E1),
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
                         }
 
-                        // Center: Primary Mic / Speak Action Button (Prominent Glowing Circle)
-                        Surface(
-                            shape = CircleShape,
-                            color = when {
-                                isListening -> Color(0xFFEF4444)
-                                isProcessing -> Color(0xFF6366F1)
-                                isSpeaking -> Color(0xFF7C3AED)
-                                else -> Color(0xFF4F46E5)
-                            },
-                            shadowElevation = 6.dp,
-                            modifier = Modifier
-                                .size(58.dp)
-                                .testTag("main_mic_action_button")
-                        ) {
-                            IconButton(
+                        // Center: Cancel / Stop Button when active, or Ready Indicator
+                        if (isVoiceActive) {
+                            Button(
                                 onClick = {
-                                    when (voiceState) {
-                                        is VoiceAssistantState.Listening -> stopListeningManually()
-                                        is VoiceAssistantState.Speaking -> {
-                                            if (isTtsSpeaking) stopAudioPlayback() else startListening()
-                                        }
-                                        is VoiceAssistantState.Processing -> {}
-                                        else -> {
-                                            val hasPermission = ContextCompat.checkSelfPermission(
-                                                context,
-                                                Manifest.permission.RECORD_AUDIO
-                                            ) == PackageManager.PERMISSION_GRANTED
-                                            if (hasPermission) {
-                                                startListening()
-                                            } else {
-                                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                            }
-                                        }
-                                    }
+                                    stopListeningManually()
+                                    stopAudioPlayback()
+                                    viewModel.resetVoiceState()
                                 },
-                                modifier = Modifier.fillMaxSize()
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFEF4444)
+                                ),
+                                shape = RoundedCornerShape(24.dp),
+                                modifier = Modifier
+                                    .height(44.dp)
+                                    .testTag("voice_cancel_button")
                             ) {
                                 Icon(
-                                    imageVector = when {
-                                        isListening -> Icons.Default.Stop
-                                        isProcessing -> Icons.Default.GraphicEq
-                                        isSpeaking -> if (isTtsSpeaking) Icons.Default.VolumeMute else Icons.Default.Mic
-                                        else -> Icons.Default.Mic
-                                    },
-                                    contentDescription = "Mic Action",
+                                    imageVector = Icons.Default.Stop,
+                                    contentDescription = null,
                                     tint = Color.White,
-                                    modifier = Modifier.size(28.dp)
+                                    modifier = Modifier.size(18.dp)
                                 )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Cancel / Stop", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                        } else if (voiceState is VoiceAssistantState.Error) {
+                            Button(
+                                onClick = {
+                                    viewModel.retryVoiceQuery { speakAloud(it) }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = vividIndigo
+                                ),
+                                shape = RoundedCornerShape(24.dp),
+                                modifier = Modifier
+                                    .height(44.dp)
+                                    .testTag("voice_retry_action_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Retry", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                        } else {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = Color(0xFF1B1E30),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x336366F1)),
+                                modifier = Modifier.testTag("voice_ready_indicator")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF10B981))
+                                    )
+                                    Text(
+                                        text = "Tap Orb to Talk",
+                                        color = Color(0xFFCBD5E1),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
 
-                        // Right: Close / Disconnect Action or System Dialog
+                        // Right: Speaker Audio Output Mute / Unmute Toggle
                         Surface(
                             shape = CircleShape,
                             color = Color(0xFF1B1E30),
@@ -1163,20 +1368,24 @@ fun VoiceScreen(
                         ) {
                             IconButton(
                                 onClick = {
-                                    if (isVoiceActive) {
-                                        stopListeningManually()
+                                    if (isTtsSpeaking) {
                                         stopAudioPlayback()
-                                        viewModel.resetVoiceState()
                                     } else {
-                                        launchSystemVoiceDialog()
+                                        viewModel.toggleSpeechOutput()
                                     }
                                 },
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier.fillMaxSize().testTag("voice_speaker_toggle")
                             ) {
                                 Icon(
-                                    imageVector = if (isVoiceActive) Icons.Default.Close else Icons.Default.MicNone,
-                                    contentDescription = if (isVoiceActive) "End session" else "System voice",
-                                    tint = if (isVoiceActive) Color(0xFFF43F5E) else Color(0xFFCBD5E1),
+                                    imageVector = if (!viewModel.isSpeechOutputEnabled) {
+                                        Icons.Default.VolumeMute
+                                    } else if (isTtsSpeaking) {
+                                        Icons.Default.GraphicEq
+                                    } else {
+                                        Icons.Default.VolumeUp
+                                    },
+                                    contentDescription = "Toggle speaker audio",
+                                    tint = if (!viewModel.isSpeechOutputEnabled) Color(0xFFF43F5E) else if (isTtsSpeaking) skyCyan else Color(0xFFCBD5E1),
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
