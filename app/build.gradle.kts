@@ -10,14 +10,15 @@ plugins {
 
 android {
   namespace = "com.example"
-  compileSdk { version = release(36) { minorApiLevel = 1 } }
+  compileSdk = 35 // Yahan 36 waali line hata kar yeh likho
 
   defaultConfig {
-    applicationId = "com.aistudio.pickai.vznkmp"
+    applicationId = "com.aistudio.pickai.vznkmp2"
     minSdk = 24
-    targetSdk = 36
+    targetSdk = 35 // Yahan 36 ko 35 kar do
     versionCode = 1
     versionName = "1.0"
+
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
