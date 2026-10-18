@@ -13,7 +13,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.pickai.vznkmp2"
+    applicationId = "com.aistudio.pickai.merged"
     minSdk = 24
     targetSdk = 35
     versionCode = 1
