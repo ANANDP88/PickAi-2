@@ -7,11 +7,13 @@ import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.*
@@ -34,6 +36,7 @@ import com.example.ui.viewmodel.MainViewModel
 sealed class Screen(val route: String) {
     object Onboarding : Screen("onboarding")
     object Home : Screen("home")
+    object Tools : Screen("tools")
     // Kept as a deep route for compatibility; voice is intentionally not a main tab.
     object LiveVoice : Screen("voice")
     object Voice : Screen("voice")
@@ -66,6 +69,7 @@ fun BottomNavigationBar(
 ) {
     val bottomNavItems = listOf(
         BottomNavItem(Screen.Home.route, "Home", Icons.Filled.Home, Icons.Outlined.Home),
+        BottomNavItem(Screen.Tools.route, "Tools", Icons.Filled.GridView, Icons.Outlined.GridView),
         BottomNavItem(Screen.CreativeTools.route, "Studio", Icons.Filled.AutoAwesome, Icons.Outlined.AutoAwesome),
         BottomNavItem(Screen.Favorites.route, "Saved", Icons.Filled.Bookmark, Icons.Outlined.BookmarkBorder),
         BottomNavItem(Screen.Settings.route, "Settings", Icons.Filled.Settings, Icons.Outlined.Settings)
@@ -138,6 +142,9 @@ fun AppNavigation(viewModel: MainViewModel) {
         ) {
             composable(Screen.Home.route) {
                 HomeScreen(navController = navController, viewModel = viewModel)
+            }
+            composable(Screen.Tools.route) {
+                ToolsDirectoryScreen(navController = navController)
             }
             composable(Screen.LiveVoice.route) {
                 VoiceScreen(viewModel = viewModel)
